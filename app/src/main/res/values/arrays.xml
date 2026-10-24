@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="quality_options">
+        <item>720p</item>
+        <item>1080p</item>
+        <item>Original size</item>
+    </string-array>
+    <string-array name="fps_options">
+        <item>30 fps</item>
+        <item>60 fps</item>
+    </string-array>
+</resources>
