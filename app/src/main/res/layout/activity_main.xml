@@ -165,6 +165,21 @@
             android:text="Start recording"
             app:icon="@android:drawable/ic_media_play" />
 
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/floatingSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:checked="true"
+            android:text="Floating ball controls" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="A movable ball over whatever you're recording. Tap it for pause, mic on/off, mute and stop — no need to leave the app or pull the shade down."
+            android:textAppearance="?attr/textAppearanceBodySmall" />
+
         <com.google.android.material.button.MaterialButton
             android:id="@+id/stopButton"
             android:layout_width="match_parent"

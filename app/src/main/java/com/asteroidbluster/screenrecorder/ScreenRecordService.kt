@@ -16,6 +16,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import java.text.SimpleDateFormat
@@ -42,6 +43,7 @@ class ScreenRecordService : Service() {
         const val EXTRA_DENSITY = "density"
         const val EXTRA_BITRATE = "bitrate"
         const val EXTRA_FPS = "fps"
+        const val EXTRA_FLOATING = "floating"
         const val EXTRA_FILE_NAME = "file_name"
 
         private const val CHANNEL_ID = "screen_recorder"
@@ -56,6 +58,12 @@ class ScreenRecordService : Service() {
     private var stopRequested = false
     private val stopHandler = Handler(Looper.getMainLooper())
     private var stopWatchdog: Runnable? = null
+
+    // Floating ball state (reset on every new recording).
+    private var floating: FloatingControls? = null
+    private var pausedState = false
+    private var micMutedState = false
+    private var audioMutedState = false
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -166,6 +174,48 @@ class ScreenRecordService : Service() {
             cleanupProjection()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+            return
+        }
+
+        // Floating ball, only if the user enabled it and the overlay
+        // permission is actually granted. Denied? Notification controls
+        // still work, nothing else changes.
+        pausedState = false
+        micMutedState = false
+        audioMutedState = false
+        if (intent.getBooleanExtra(EXTRA_FLOATING, false) &&
+            Settings.canDrawOverlays(this)
+        ) {
+            val controls = FloatingControls(this, object : FloatingControls.Callbacks {
+                override fun onPauseToggle() {
+                    pausedState = !pausedState
+                    engine?.setPaused(pausedState)
+                    floating?.setPaused(pausedState)
+                }
+
+                override fun onMicToggle() {
+                    micMutedState = !micMutedState
+                    engine?.setMicMuted(micMutedState)
+                    floating?.setMicMuted(micMutedState)
+                }
+
+                override fun onMuteToggle() {
+                    audioMutedState = !audioMutedState
+                    engine?.setAudioMuted(audioMutedState)
+                    floating?.setMuted(audioMutedState)
+                }
+
+                override fun onStop() {
+                    requestStop()
+                }
+
+                override fun onHide() {
+                    floating?.hide()
+                    floating = null
+                }
+            })
+            floating = controls
+            controls.show()
         }
     }
 
@@ -205,6 +255,8 @@ class ScreenRecordService : Service() {
             outputUri = null
             outputName = null
             engine = null
+            floating?.hide()
+            floating = null
             cleanupProjection()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -220,6 +272,8 @@ class ScreenRecordService : Service() {
                 }
                 outputFd = null
                 engine = null
+                floating?.hide()
+                floating = null
                 cleanupProjection()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -242,6 +296,8 @@ class ScreenRecordService : Service() {
     }
 
     override fun onDestroy() {
+        floating?.hide()
+        floating = null
         if (engine != null && !stopRequested) {
             requestStop()
         }

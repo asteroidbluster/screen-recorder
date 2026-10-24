@@ -75,6 +75,16 @@ class RecordingEngine(
     private val stopping = AtomicBoolean(false)
     private val errored = AtomicBoolean(false)
 
+    // Live controls from the floating ball. Pause drops video frames and
+    // drains (discards) audio chunks while paused, then re-bases video
+    // timestamps on resume so the saved clip has no gap in it.
+    private val paused = AtomicBoolean(false)
+    private val micMuted = AtomicBoolean(false)
+    private val audioMuted = AtomicBoolean(false)
+    @Volatile
+    private var pauseStartMonoNs = 0L
+    private val pausedTotalUs = java.util.concurrent.atomic.AtomicLong(0)
+
     private var videoEncoder: MediaCodec? = null
     private var audioEncoder: MediaCodec? = null
     private var muxer: MediaMuxer? = null
@@ -202,6 +212,18 @@ class RecordingEngine(
             val singleQueue =
                 if (config.audioMode == AudioMode.INTERNAL) internalQueue else micQueue
             while (!stopping.get()) {
+                // Paused: drain (discard) audio chunks without feeding
+                // them, so the queues can't grow and the audio clock
+                // stands still until resume.
+                if (paused.get()) {
+                    try {
+                        micQueue.poll(10, TimeUnit.MILLISECONDS)
+                        internalQueue.poll(10, TimeUnit.MILLISECONDS)
+                    } catch (e: InterruptedException) {
+                        break
+                    }
+                    continue
+                }
                 val chunk: ShortArray = try {
                     if (config.audioMode == AudioMode.BOTH) {
                         val mic = micQueue.poll(100, TimeUnit.MILLISECONDS)
@@ -210,11 +232,19 @@ class RecordingEngine(
                         // Never drop the side that did deliver: a silent
                         // game means an empty internal queue, not a reason
                         // to throw the mic chunk away. Mix against zeros.
-                        val micPart = mic ?: ShortArray(internal!!.size)
-                        val internalPart = internal ?: ShortArray(mic!!.size)
-                        mix(micPart, internalPart)
+                        var micPart = mic ?: ShortArray(internal!!.size)
+                        var internalPart = internal ?: ShortArray(mic!!.size)
+                        if (micMuted.get()) micPart = ShortArray(micPart.size)
+                        if (audioMuted.get()) {
+                            ShortArray(min(micPart.size, internalPart.size))
+                        } else {
+                            mix(micPart, internalPart)
+                        }
                     } else {
-                        singleQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                        val raw = singleQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                        val muted = audioMuted.get() ||
+                            (config.audioMode == AudioMode.EXTERNAL && micMuted.get())
+                        if (muted) ShortArray(raw.size) else raw
                     }
                 } catch (e: InterruptedException) {
                     break
@@ -255,6 +285,28 @@ class RecordingEngine(
             } catch (ignored: Exception) {
             }
         }, "audio-feeder").also { it.start() }
+    }
+
+    /** Pause/resume from the floating ball. No gap is left in the clip. */
+    fun setPaused(p: Boolean) {
+        if (paused.getAndSet(p) == p) return
+        if (p) {
+            pauseStartMonoNs = System.nanoTime()
+        } else if (firstVideoPtsUs >= 0) {
+            // Only re-base once at least one frame exists; before the
+            // first frame there is nothing to shift.
+            pausedTotalUs.addAndGet((System.nanoTime() - pauseStartMonoNs) / 1000)
+        }
+    }
+
+    /** Mic on/off from the floating ball (feeds silence while muted). */
+    fun setMicMuted(m: Boolean) {
+        micMuted.set(m)
+    }
+
+    /** Mute all audio from the floating ball (feeds silence). */
+    fun setAudioMuted(m: Boolean) {
+        audioMuted.set(m)
     }
 
     private fun mix(a: ShortArray, b: ShortArray): ShortArray {
@@ -411,14 +463,20 @@ class RecordingEngine(
                     videoEosLatch.countDown()
                 } else if (info.size > 0) {
                     if (firstVideoPtsUs < 0) firstVideoPtsUs = info.presentationTimeUs
-                    val adjusted = MediaCodec.BufferInfo()
-                    adjusted.set(
-                        info.offset, info.size,
-                        (info.presentationTimeUs - firstVideoPtsUs).coerceAtLeast(0),
-                        info.flags
-                    )
-                    val buffer = codec.getOutputBuffer(index)
-                    if (buffer != null) writeSample(videoTrack, buffer, adjusted)
+                    // While paused, drop frames; on resume the
+                    // accumulated pause duration is subtracted so the
+                    // clip plays back with no gap.
+                    if (!paused.get()) {
+                        val adjusted = MediaCodec.BufferInfo()
+                        adjusted.set(
+                            info.offset, info.size,
+                            (info.presentationTimeUs - firstVideoPtsUs -
+                                pausedTotalUs.get()).coerceAtLeast(0),
+                            info.flags
+                        )
+                        val buffer = codec.getOutputBuffer(index)
+                        if (buffer != null) writeSample(videoTrack, buffer, adjusted)
+                    }
                 }
             } catch (ignored: Exception) {
             } finally {

@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -20,8 +21,10 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import android.provider.Settings
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.radiobutton.MaterialRadioButton
+import com.google.android.material.switchmaterial.SwitchMaterial
 
 /**
  * Material 3 UI: pick an audio mode, a resolution and a frame rate,
@@ -44,6 +47,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var micOnlyRadio: MaterialRadioButton
     private lateinit var internalOnlyRadio: MaterialRadioButton
     private lateinit var bothRadio: MaterialRadioButton
+    private lateinit var floatingSwitch: SwitchMaterial
     private lateinit var resolutionView: AutoCompleteTextView
     private lateinit var fpsView: AutoCompleteTextView
 
@@ -101,6 +105,14 @@ class MainActivity : AppCompatActivity() {
             proceedWithStart()
         }
 
+    private val overlayPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            // Granted or not, recording goes ahead: without the overlay
+            // permission the ball just doesn't appear, and the
+            // notification controls still work.
+            continueToCapture()
+        }
+
     private val savedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val name = intent.getStringExtra(ScreenRecordService.EXTRA_FILE_NAME)
@@ -121,6 +133,7 @@ class MainActivity : AppCompatActivity() {
         micOnlyRadio = findViewById(R.id.radioMicOnly)
         internalOnlyRadio = findViewById(R.id.radioInternalOnly)
         bothRadio = findViewById(R.id.radioBoth)
+        floatingSwitch = findViewById(R.id.floatingSwitch)
         resolutionView = findViewById(R.id.resolutionDropdown)
         fpsView = findViewById(R.id.fpsDropdown)
 
@@ -149,6 +162,7 @@ class MainActivity : AppCompatActivity() {
             prefs.getString("resolution", prefs.getString("quality", "1080p")), false
         )
         fpsView.setText(prefs.getString("fps", "30 fps"), false)
+        floatingSwitch.isChecked = prefs.getBoolean("floating_ball", true)
 
         // Internal capture needs Android 10 (API 29)+.
         if (Build.VERSION.SDK_INT < 29) {
@@ -163,16 +177,23 @@ class MainActivity : AppCompatActivity() {
 
         startButton.setOnClickListener {
             saveChoices()
-            // Android 13+ notification permission: ask once so the
-            // ongoing notification with the Stop button is guaranteed
-            // to show, even on devices that gate it on this permission.
-            if (Build.VERSION.SDK_INT >= 33 &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            // Floating ball needs "Display over other apps": ask once
+            // before recording starts. Denied? Recording still goes
+            // ahead, the ball just doesn't appear.
+            if (floatingSwitch.isChecked && !Settings.canDrawOverlays(this)) {
+                Toast.makeText(
+                    this,
+                    "Allow display over other apps for the floating ball.",
+                    Toast.LENGTH_SHORT
+                ).show()
+                overlayPermissionLauncher.launch(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                )
             } else {
-                proceedWithStart()
+                continueToCapture()
             }
         }
 
@@ -200,6 +221,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun continueToCapture() {
+        // Android 13+ notification permission: ask once so the
+        // ongoing notification with the Stop button is guaranteed
+        // to show, even on devices that gate it on this permission.
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            proceedWithStart()
+        }
+    }
+
     private fun proceedWithStart() {
         val mode = selectedMode()
         val needsMic = mode == AudioMode.EXTERNAL || mode == AudioMode.BOTH
@@ -224,6 +259,7 @@ class MainActivity : AppCompatActivity() {
             .putString("audio_mode", selectedMode().name)
             .putString("resolution", resolutionView.text.toString())
             .putString("fps", fpsView.text.toString())
+            .putBoolean("floating_ball", floatingSwitch.isChecked)
             .apply()
     }
 
@@ -272,6 +308,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(ScreenRecordService.EXTRA_DENSITY, metrics.densityDpi)
             putExtra(ScreenRecordService.EXTRA_BITRATE, bitrate)
             putExtra(ScreenRecordService.EXTRA_FPS, fps)
+            putExtra(ScreenRecordService.EXTRA_FLOATING, floatingSwitch.isChecked)
         }
         ContextCompat.startForegroundService(this, intent)
         statusText.text = "Recording… pull down the notification shade to stop."

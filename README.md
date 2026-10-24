@@ -4,8 +4,12 @@ An open-source Android screen recorder with the audio options built-in
 recorders usually refuse you: your voice, the game's sound, or both at
 once.
 
-## Features (v1.2)
+## Features (v1.3)
 
+- **Floating ball controls**: a draggable ball over whatever you're
+  recording — tap to expand into Pause/Resume, Mic on/off, Mute, Stop
+  and Hide. Needs "Display over other apps" (asked once on Start);
+  without it, the notification controls still work
 - **Three audio modes**: microphone only, internal audio only, or
   microphone + internal audio mixed together
 - **Resolution**: 480p, 720p, 1080p, 1440p, or original size (capped at
@@ -19,6 +23,14 @@ once.
   notification Stop button
 - Saves to `Movies/ScreenRecorder` on your phone
 - No accounts, no analytics, no network: recordings never leave your device
+
+## Fixed in v1.3
+
+- Pause actually pauses: video frames are dropped and audio is drained
+  while paused, and timestamps are re-based on resume, so the saved
+  clip plays back as one continuous recording with no gap.
+- Mic and Mute work mid-recording: muting feeds silence instead of
+  stopping anything, so toggling back on is instant and glitch-free.
 
 ## Fixed in v1.2 (from the first on-phone test)
 
@@ -58,8 +70,8 @@ when both are on), and both tracks are muxed into one MP4.
 3. Open **Screen Recorder**, leave the mic toggle on, tap **Start
    recording**, and approve the system screen-capture dialog (Android
    asks every time — no app can record silently).
-4. Stop from the app or from the notification. The video lands in
-   `Movies/ScreenRecorder`.
+4. Stop from the app, from the notification, or from the floating ball.
+   The video lands in `Movies/ScreenRecorder`.
 
 ## Permissions, and why each is needed
 
