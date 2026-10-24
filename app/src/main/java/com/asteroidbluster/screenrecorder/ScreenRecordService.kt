@@ -180,7 +180,7 @@ class ScreenRecordService : Service() {
             return
         }
         currentEngine.stopAsync { success ->
-            stopHandler.removeCallbacks(stopWatchdog)
+            stopWatchdog?.let { stopHandler.removeCallbacks(it) }
             stopWatchdog = null
             if (success) {
                 sendBroadcast(
