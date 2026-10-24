@@ -10,6 +10,9 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
 import android.widget.TextView
@@ -21,7 +24,7 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.radiobutton.MaterialRadioButton
 
 /**
- * Material 3 UI: pick an audio mode, a video quality and a frame rate,
+ * Material 3 UI: pick an audio mode, a resolution and a frame rate,
  * then Start. Recording itself lives in [ScreenRecordService] so it keeps
  * going when you leave the app.
  *
@@ -34,13 +37,27 @@ import com.google.android.material.radiobutton.MaterialRadioButton
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
+    private lateinit var statusDot: View
+    private lateinit var elapsedText: TextView
+    private lateinit var startButton: MaterialButton
+    private lateinit var stopButton: MaterialButton
     private lateinit var micOnlyRadio: MaterialRadioButton
     private lateinit var internalOnlyRadio: MaterialRadioButton
     private lateinit var bothRadio: MaterialRadioButton
-    private lateinit var qualityView: AutoCompleteTextView
+    private lateinit var resolutionView: AutoCompleteTextView
     private lateinit var fpsView: AutoCompleteTextView
 
     private val prefs by lazy { getSharedPreferences("recorder", MODE_PRIVATE) }
+
+    private var recordingStartMs = 0L
+    private val timerHandler = Handler(Looper.getMainLooper())
+    private val timerRunnable = object : Runnable {
+        override fun run() {
+            val seconds = ((System.currentTimeMillis() - recordingStartMs) / 1000).toInt()
+            elapsedText.text = "%d:%02d".format(seconds / 60, seconds % 60)
+            timerHandler.postDelayed(this, 1000)
+        }
+    }
 
     private val captureLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -76,10 +93,19 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            // Granted or not, recording goes ahead: the foreground
+            // notification is required by Android either way, but asking
+            // covers devices where it is also gated on this permission.
+            proceedWithStart()
+        }
+
     private val savedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val name = intent.getStringExtra(ScreenRecordService.EXTRA_FILE_NAME)
             statusText.text = if (name != null) "Saved: $name" else "Recording stopped."
+            setRecordingUi(false)
         }
     }
 
@@ -88,17 +114,21 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         statusText = findViewById(R.id.statusText)
+        statusDot = findViewById(R.id.statusDot)
+        elapsedText = findViewById(R.id.elapsedText)
+        startButton = findViewById(R.id.startButton)
+        stopButton = findViewById(R.id.stopButton)
         micOnlyRadio = findViewById(R.id.radioMicOnly)
         internalOnlyRadio = findViewById(R.id.radioInternalOnly)
         bothRadio = findViewById(R.id.radioBoth)
-        qualityView = findViewById(R.id.qualityDropdown)
+        resolutionView = findViewById(R.id.resolutionDropdown)
         fpsView = findViewById(R.id.fpsDropdown)
 
-        qualityView.setAdapter(
+        resolutionView.setAdapter(
             ArrayAdapter(
                 this,
                 android.R.layout.simple_dropdown_item_1line,
-                resources.getStringArray(R.array.quality_options)
+                resources.getStringArray(R.array.resolution_options)
             )
         )
         fpsView.setAdapter(
@@ -109,13 +139,15 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        // Restore last choices.
+        // Restore last choices ("resolution" supersedes the old "quality" key).
         when (prefs.getString("audio_mode", AudioMode.EXTERNAL.name)) {
             AudioMode.INTERNAL.name -> internalOnlyRadio.isChecked = true
             AudioMode.BOTH.name -> bothRadio.isChecked = true
             else -> micOnlyRadio.isChecked = true
         }
-        qualityView.setText(prefs.getString("quality", "1080p"), false)
+        resolutionView.setText(
+            prefs.getString("resolution", prefs.getString("quality", "1080p")), false
+        )
         fpsView.setText(prefs.getString("fps", "30 fps"), false)
 
         // Internal capture needs Android 10 (API 29)+.
@@ -127,21 +159,24 @@ class MainActivity : AppCompatActivity() {
             micOnlyRadio.isChecked = true
         }
 
-        findViewById<MaterialButton>(R.id.startButton).setOnClickListener {
+        stopButton.isEnabled = false
+
+        startButton.setOnClickListener {
             saveChoices()
-            val mode = selectedMode()
-            val needsMic = mode == AudioMode.EXTERNAL || mode == AudioMode.BOTH
-            if (needsMic &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            // Android 13+ notification permission: ask once so the
+            // ongoing notification with the Stop button is guaranteed
+            // to show, even on devices that gate it on this permission.
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED
             ) {
-                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             } else {
-                launchCapture()
+                proceedWithStart()
             }
         }
 
-        findViewById<MaterialButton>(R.id.stopButton).setOnClickListener {
+        stopButton.setOnClickListener {
             val intent = Intent(this, ScreenRecordService::class.java).apply {
                 action = ScreenRecordService.ACTION_STOP
             }
@@ -158,9 +193,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        timerHandler.removeCallbacks(timerRunnable)
         try {
             unregisterReceiver(savedReceiver)
         } catch (ignored: IllegalArgumentException) {
+        }
+    }
+
+    private fun proceedWithStart() {
+        val mode = selectedMode()
+        val needsMic = mode == AudioMode.EXTERNAL || mode == AudioMode.BOTH
+        if (needsMic &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            launchCapture()
         }
     }
 
@@ -173,7 +222,7 @@ class MainActivity : AppCompatActivity() {
     private fun saveChoices() {
         prefs.edit()
             .putString("audio_mode", selectedMode().name)
-            .putString("quality", qualityView.text.toString())
+            .putString("resolution", resolutionView.text.toString())
             .putString("fps", fpsView.text.toString())
             .apply()
     }
@@ -189,11 +238,17 @@ class MainActivity : AppCompatActivity() {
         val nativeW = metrics.widthPixels
         val nativeH = metrics.heightPixels
 
-        // Quality = short-side resolution, so 720p/1080p mean the same
+        // Resolution = short-side target, so 720p/1080p mean the same
         // thing in portrait and landscape. Original = native, capped.
-        val (targetW, targetH, bitrate) = when (qualityView.text.toString()) {
+        val (targetW, targetH, bitrate) = when (resolutionView.text.toString()) {
+            "480p" -> scaledSize(nativeW, nativeH, 480).let { (w, h) ->
+                Triple(w, h, 3_000_000)
+            }
             "720p" -> scaledSize(nativeW, nativeH, 720).let { (w, h) ->
                 Triple(w, h, 5_000_000)
+            }
+            "1440p" -> scaledSize(nativeW, nativeH, 1440).let { (w, h) ->
+                Triple(w, h, 12_000_000)
             }
             "Original size" -> cappedSize(nativeW, nativeH, 1920).let { (w, h) ->
                 Triple(w, h, 12_000_000)
@@ -220,21 +275,41 @@ class MainActivity : AppCompatActivity() {
         }
         ContextCompat.startForegroundService(this, intent)
         statusText.text = "Recording… pull down the notification shade to stop."
+        setRecordingUi(true)
     }
 
-    /** Scale so the short side equals [target], keeping aspect, even sides. */
+    private fun setRecordingUi(recording: Boolean) {
+        startButton.isEnabled = !recording
+        stopButton.isEnabled = recording
+        statusDot.visibility = if (recording) View.VISIBLE else View.GONE
+        if (recording) {
+            recordingStartMs = System.currentTimeMillis()
+            elapsedText.text = "0:00"
+            timerHandler.post(timerRunnable)
+        } else {
+            timerHandler.removeCallbacks(timerRunnable)
+            elapsedText.text = ""
+        }
+    }
+
+    /** Scale so the short side equals [target], keeping aspect, 16-aligned. */
     private fun scaledSize(w: Int, h: Int, target: Int): Pair<Int, Int> {
         val scale = target.toFloat() / minOf(w, h)
-        return even((w * scale).toInt()) to even((h * scale).toInt())
+        return align16((w * scale).toInt()) to align16((h * scale).toInt())
     }
 
-    /** Native size, but cap the long side at [cap], keeping aspect. */
+    /** Native size, but cap the long side at [cap], keeping aspect, 16-aligned. */
     private fun cappedSize(w: Int, h: Int, cap: Int): Pair<Int, Int> {
         val longer = maxOf(w, h)
-        if (longer <= cap) return even(w) to even(h)
+        if (longer <= cap) return align16(w) to align16(h)
         val scale = cap.toFloat() / longer
-        return even((w * scale).toInt()) to even((h * scale).toInt())
+        return align16((w * scale).toInt()) to align16((h * scale).toInt())
     }
 
-    private fun even(value: Int): Int = if (value % 2 == 1) value - 1 else value
+    /**
+     * Round to the nearest multiple of 16. Hardware H.264 encoders work
+     * on 16x16 macroblocks; unaligned sizes (v1.1.0 produced e.g.
+     * 720x1502) cost them a slower fallback path.
+     */
+    private fun align16(value: Int): Int = maxOf(16, ((value + 8) / 16) * 16)
 }

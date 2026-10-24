@@ -12,7 +12,9 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
+import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.view.Surface
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -54,8 +56,8 @@ data class RecordingConfig(
  * single AAC encoder. Everything is muxed into one MP4.
  *
  * A/V sync approach: video timestamps are normalised to the first frame,
- * audio timestamps count samples from zero. Both start together, so drift
- * stays within a frame or two for typical recordings.
+ * audio timestamps count audio frames from zero. Both start together, so
+ * drift stays within a frame or two for typical recordings.
  */
 class RecordingEngine(
     private val outputFd: ParcelFileDescriptor,
@@ -120,12 +122,22 @@ class RecordingEngine(
             )
             setInteger(MediaFormat.KEY_BIT_RATE, config.videoBitRate)
             setInteger(MediaFormat.KEY_FRAME_RATE, config.frameRate)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
         }
         val vEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         vEncoder.setCallback(VideoCallback())
         vEncoder.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val inputSurface = vEncoder.createInputSurface()
+        if (Build.VERSION.SDK_INT >= 30) {
+            // Cap frame production at the chosen rate. Without this the
+            // compositor can feed the encoder at the display's refresh
+            // rate (120 Hz on this phone) even for a 60 fps recording,
+            // doubling encode and composition load for no benefit.
+            inputSurface.setFrameRate(
+                config.frameRate.toFloat(),
+                Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
+            )
+        }
         vEncoder.start()
         videoEncoder = vEncoder
 
@@ -192,10 +204,15 @@ class RecordingEngine(
             while (!stopping.get()) {
                 val chunk: ShortArray = try {
                     if (config.audioMode == AudioMode.BOTH) {
-                        val mic = micQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                        val mic = micQueue.poll(100, TimeUnit.MILLISECONDS)
                         val internal = internalQueue.poll(100, TimeUnit.MILLISECONDS)
-                            ?: continue
-                        mix(mic, internal)
+                        if (mic == null && internal == null) continue
+                        // Never drop the side that did deliver: a silent
+                        // game means an empty internal queue, not a reason
+                        // to throw the mic chunk away. Mix against zeros.
+                        val micPart = mic ?: ShortArray(internal!!.size)
+                        val internalPart = internal ?: ShortArray(mic!!.size)
+                        mix(micPart, internalPart)
                     } else {
                         singleQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
                     }
@@ -213,7 +230,12 @@ class RecordingEngine(
                     buffer.order(ByteOrder.LITTLE_ENDIAN)
                     buffer.clear()
                     buffer.asShortBuffer().put(chunk)
-                    val pts = samplesFed * 1_000_000L / SAMPLE_RATE
+                    // samplesFed counts SHORTS (stereo = 2 per frame), so
+                    // divide by sample rate x channels. Dividing by the
+                    // sample rate alone stamped audio at 2x speed — the
+                    // v1.1.0 fast-playback bug, proven by ffprobe: audio
+                    // tracks ran ~2x as long as their video tracks.
+                    val pts = samplesFed * 1_000_000L / (SAMPLE_RATE * CHANNELS)
                     samplesFed += chunk.size
                     encoder.queueInputBuffer(index, 0, chunk.size * 2, pts, 0)
                 } catch (e: IllegalStateException) {
@@ -225,7 +247,8 @@ class RecordingEngine(
                 val index = audioInputIndices.poll(1, TimeUnit.SECONDS)
                 if (index != null) {
                     audioEncoder?.queueInputBuffer(
-                        index, 0, 0, samplesFed * 1_000_000L / SAMPLE_RATE,
+                        index, 0, 0,
+                        samplesFed * 1_000_000L / (SAMPLE_RATE * CHANNELS),
                         MediaCodec.BUFFER_FLAG_END_OF_STREAM
                     )
                 }
@@ -287,8 +310,15 @@ class RecordingEngine(
                 videoEncoder?.signalEndOfInputStream()
             } catch (ignored: Exception) {
             }
-            videoEosLatch.await(3, TimeUnit.SECONDS)
-            audioEosLatch.await(3, TimeUnit.SECONDS)
+            // Bounded waits: a stuck latch must never wedge the stop path.
+            try {
+                videoEosLatch.await(3, TimeUnit.SECONDS)
+            } catch (ignored: Exception) {
+            }
+            try {
+                audioEosLatch.await(3, TimeUnit.SECONDS)
+            } catch (ignored: Exception) {
+            }
 
             var success = false
             synchronized(lock) {

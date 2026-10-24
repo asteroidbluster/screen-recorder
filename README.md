@@ -4,18 +4,40 @@ An open-source Android screen recorder with the audio options built-in
 recorders usually refuse you: your voice, the game's sound, or both at
 once.
 
-## Features (v1.1)
+## Features (v1.2)
 
 - **Three audio modes**: microphone only, internal audio only, or
   microphone + internal audio mixed together
-- **Video quality**: 720p, 1080p, or original size (capped at 1920 px on
-  the long side)
-- **Frame rate**: 30 or 60 fps
-- **Material 3 UI** — your last choices are remembered
+- **Resolution**: 480p, 720p, 1080p, 1440p, or original size (capped at
+  1920 px on the long side) — short-side target, so it means the same
+  thing in portrait and landscape
+- **Frame rate**: 30 or 60 fps (capped at the chosen rate, so a 120 Hz
+  display can't overload the encoder)
+- **Material 3 UI** — your last choices are remembered; a status card
+  shows the recording state with a live timer
 - Records while you switch apps, via a foreground service with a
   notification Stop button
 - Saves to `Movies/ScreenRecorder` on your phone
 - No accounts, no analytics, no network: recordings never leave your device
+
+## Fixed in v1.2 (from the first on-phone test)
+
+- **Fast playback**: audio timestamps were stamped at 2x speed (stereo
+  sample count divided by the sample rate alone). Audio tracks ran
+  about twice as long as their video tracks — now fixed.
+- **Mic disappearing in Mic + internal mode**: when the game was silent
+  the mixer threw the mic chunk away. It now mixes against silence
+  instead.
+- **Missing notification**: the channel was low-importance (silent
+  section) and the app never asked for the notification permission. Now
+  default importance, the permission is requested on Start, and tapping
+  the notification opens the app.
+- **Stop not stopping**: the stop path is now bounded everywhere and a
+  12-second watchdog force-stops a wedged stop, plus the buttons track
+  recording state so Start/Stop can't disagree with reality.
+- **Lag at 720p60**: frame production is capped at the chosen rate,
+  recording sizes are aligned to 16 px macroblocks, and keyframes are
+  every 2 s instead of every 1 s.
 
 ## How it works under the hood
 
@@ -59,7 +81,7 @@ recording. The app cannot start recording without you approving it.
 Requires Android SDK 34 and JDK 17. GitHub Actions builds the debug APK
 on every push to `main` (see `.github/workflows/android.yml`).
 
-## v1.1 limits (honest list)
+## v1.2 limits (honest list)
 
 - Internal audio needs Android 10+. Some apps opt out of being captured,
   and system UI sounds are not captured — that's Android's rule, not the

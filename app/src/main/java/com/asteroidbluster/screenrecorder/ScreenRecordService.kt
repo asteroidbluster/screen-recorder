@@ -11,7 +11,9 @@ import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
@@ -52,6 +54,8 @@ class ScreenRecordService : Service() {
     private var outputUri: android.net.Uri? = null
     private var outputName: String? = null
     private var stopRequested = false
+    private val stopHandler = Handler(Looper.getMainLooper())
+    private var stopWatchdog: Runnable? = null
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -110,11 +114,16 @@ class ScreenRecordService : Service() {
             this, 0, stopIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val contentPending = PendingIntent.getActivity(
+            this, 1, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Screen recording")
             .setContentText("$modeLabel • ${config.width}x${config.height} @ ${config.frameRate}fps")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
+            .setContentIntent(contentPending)
             .addAction(android.R.drawable.ic_media_pause, "Stop", stopPending)
             .build()
         ServiceCompat.startForeground(
@@ -171,6 +180,8 @@ class ScreenRecordService : Service() {
             return
         }
         currentEngine.stopAsync { success ->
+            stopHandler.removeCallbacks(stopWatchdog)
+            stopWatchdog = null
             if (success) {
                 sendBroadcast(
                     Intent(ACTION_RECORDING_SAVED).apply {
@@ -198,6 +209,24 @@ class ScreenRecordService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
+        // Watchdog: if the stop thread ever wedges, force the recording
+        // to end anyway after 12s. A late-saved file beats a recording
+        // that can never be stopped.
+        val watchdog = Runnable {
+            if (engine != null) {
+                try {
+                    outputFd?.close()
+                } catch (ignored: Exception) {
+                }
+                outputFd = null
+                engine = null
+                cleanupProjection()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+        stopWatchdog = watchdog
+        stopHandler.postDelayed(watchdog, 12_000)
     }
 
     private fun cleanupProjection() {
@@ -225,7 +254,10 @@ class ScreenRecordService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Screen recording",
-                NotificationManager.IMPORTANCE_LOW
+                // DEFAULT, not LOW: LOW drops the notification into the
+                // shade's silent section (or off it entirely on some
+                // devices), which is how v1.1.0's Stop button went missing.
+                NotificationManager.IMPORTANCE_DEFAULT
             )
             manager.createNotificationChannel(channel)
         }
